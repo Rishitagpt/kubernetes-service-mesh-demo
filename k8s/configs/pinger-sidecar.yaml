@@ -1,0 +1,331 @@
+# ------------------- 1. CONFIG MAPS (Envoy Settings) -------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-conf-frontend
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - address:
+          socket_address: { address: 0.0.0.0, port_value: 8000 } # Envoy listens here
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              codec_type: AUTO
+              stat_prefix: ingress_http
+              route_config:
+                name: local_route
+                virtual_hosts:
+                - name: backend
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: local_app }
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config: {}
+      clusters:
+      - name: local_app
+        connect_timeout: 0.25s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: local_app
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: 127.0.0.1, port_value: 9000 } # Fwds to Frontend App
+    admin:
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8081 } # Admin/Metrics Port
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-conf-details
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - address:
+          socket_address: { address: 0.0.0.0, port_value: 8000 }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              codec_type: AUTO
+              stat_prefix: ingress_http
+              route_config:
+                name: local_route
+                virtual_hosts:
+                - name: backend
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: local_app }
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config: {}
+      clusters:
+      - name: local_app
+        connect_timeout: 0.25s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: local_app
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: 127.0.0.1, port_value: 4000 } # Fwds to Details App
+    admin:
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8081 }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-conf-pinger
+data:
+  envoy.yaml: |
+    static_resources:
+      listeners:
+      - address:
+          socket_address: { address: 0.0.0.0, port_value: 8000 }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              codec_type: AUTO
+              stat_prefix: ingress_http
+              route_config:
+                name: local_route
+                virtual_hosts:
+                - name: backend
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: local_app }
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config: {}
+      clusters:
+      - name: local_app
+        connect_timeout: 0.25s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: local_app
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address: { address: 127.0.0.1, port_value: 3000 } # Fwds to Pinger App
+    admin:
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8081 }
+
+# ------------------- 2. DEPLOYMENTS (With Sidecars) -------------------
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels: { app: frontend }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: frontend }
+  template:
+    metadata:
+      labels: { app: frontend }
+      annotations:
+        prometheus.io/scrape: "true" # Enables Task 2.2
+        prometheus.io/port: "8081"
+        prometheus.io/path: "/stats/prometheus"
+    spec:
+      containers:
+      # Application Container
+      - name: frontend
+        image: localhost/frontend:v1
+        resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits: { cpu: "200m", memory: "128Mi" }
+        env:
+        - name: PINGER_BASE_URL
+          value: "http://pinger-v1-service:3000"
+        - name: DETAILS_BASE_URL
+          value: "http://details-service:4000"
+        ports: [{ containerPort: 9000 }]
+        imagePullPolicy: IfNotPresent
+      # Envoy Sidecar Container
+      - name: envoy
+        image: envoyproxy/envoy:v1.18.2
+        volumeMounts:
+        - name: config
+          mountPath: /etc/envoy/
+        ports: [{ containerPort: 8000 }, { containerPort: 8081 }]
+      volumes:
+      - name: config
+        configMap: { name: envoy-conf-frontend }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+spec:
+  ports:
+  - port: 9000
+    targetPort: 8000 # Traffic hits Envoy (8000), not App (9000)
+  selector:
+    app: frontend
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: details
+  labels: { app: details }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: details }
+  template:
+    metadata:
+      labels: { app: details }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: "/stats/prometheus"
+    spec:
+      containers:
+      - name: details
+        image: localhost/details:v1
+        resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits: { cpu: "200m", memory: "128Mi" }
+        ports: [{ containerPort: 4000 }]
+        imagePullPolicy: IfNotPresent
+      - name: envoy
+        image: envoyproxy/envoy:v1.18.2
+        volumeMounts:
+        - name: config
+          mountPath: /etc/envoy/
+        ports: [{ containerPort: 8000 }, { containerPort: 8081 }]
+      volumes:
+      - name: config
+        configMap: { name: envoy-conf-details }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: details-service
+spec:
+  ports:
+  - port: 4000
+    targetPort: 8000
+  selector:
+    app: details
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pinger-v1
+  labels: { app: pinger, version: v1 }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pinger, version: v1 }
+  template:
+    metadata:
+      labels: { app: pinger, version: v1 }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: "/stats/prometheus"
+    spec:
+      containers:
+      - name: pinger
+        image: localhost/pinger:v1
+        resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits: { cpu: "200m", memory: "128Mi" }
+        ports: [{ containerPort: 3000 }]
+        imagePullPolicy: IfNotPresent
+      - name: envoy
+        image: envoyproxy/envoy:v1.18.2
+        volumeMounts:
+        - name: config
+          mountPath: /etc/envoy/
+        ports: [{ containerPort: 8000 }, { containerPort: 8081 }]
+      volumes:
+      - name: config
+        configMap: { name: envoy-conf-pinger }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pinger-v1-service
+spec:
+  ports:
+  - port: 3000
+    targetPort: 8000
+  selector:
+    app: pinger
+    version: v1
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pinger-v2
+  labels: { app: pinger, version: v2 }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: pinger, version: v2 }
+  template:
+    metadata:
+      labels: { app: pinger, version: v2 }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: "/stats/prometheus"
+    spec:
+      containers:
+      - name: pinger
+        image: localhost/pinger:v2
+        resources:
+            requests: { cpu: "100m", memory: "64Mi" }
+            limits: { cpu: "200m", memory: "128Mi" }
+        ports: [{ containerPort: 3000 }]
+        imagePullPolicy: IfNotPresent
+      - name: envoy
+        image: envoyproxy/envoy:v1.18.2
+        volumeMounts:
+        - name: config
+          mountPath: /etc/envoy/
+        ports: [{ containerPort: 8000 }, { containerPort: 8081 }]
+      volumes:
+      - name: config
+        configMap: { name: envoy-conf-pinger }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pinger-v2-service
+spec:
+  ports:
+  - port: 3000
+    targetPort: 8000
+  selector:
+    app: pinger
+    version: v2
+  type: ClusterIP
